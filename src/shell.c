@@ -84,10 +84,18 @@ int main(int argc, char *argv[]){
         fclose(fp);
         return 1;
     }
+   char *image_name = strrchr(argv[1], '/');
+    if (image_name == NULL) {
+        image_name = argv[1];
+    } else {
+        image_name++;
+    }
+    char current_path[256] = "/";
+
 
     // shell interface
     while(1){
-        printf("Enter command: ");
+        printf("%s%s> ", image_name, current_path);
         if (fgets(input, sizeof(input), stdin) == NULL) {
             perror("Error reading input");
             cleanup_and_exit(&bpb, fp);
