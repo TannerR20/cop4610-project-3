@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 // BPB structure
 typedef struct __attribute__((packed))
@@ -51,6 +52,16 @@ void print_bpb_info(BPB *bpb, FILE *fp) {
     printf("Size of image (in bytes): %u\n", (bpb->BPB_TotSec32 * bpb->BPB_BytesPerSec));
 }
 
+void cleanup_and_exit(BPB *bpb, FILE *fp) {
+    if (fp!=NULL) {
+        fclose(fp);
+    }
+    if (bpb!=NULL) {
+        free(bpb);
+    }
+    exit(0);
+}
+
 int main(int argc, char *argv[]){
         if (argc != 2) {
         fprintf(stderr, "Usage: %s [FAT32 ISO file]\n", argv[0]);
@@ -76,8 +87,21 @@ int main(int argc, char *argv[]){
 
     // shell interface
     while(1){
-        print_bpb_info(&bpb, fp);
-        break;
+        printf("Enter command: ");
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            perror("Error reading input");
+            cleanup_and_exit(&bpb, fp);
+        }
+        else if (fgets(input, sizeof(input), stdin) == "exit") {;
+            cleanup_and_exit(&bpb, fp);
+        }
+        else if (fgets(input, sizeof(input), stdin) == "info") {
+            print_bpb_info(&bpb, fp);
+        }
+        else {
+            printf("Invalid command\n");
+        }
+
     }
 
     return 0;
