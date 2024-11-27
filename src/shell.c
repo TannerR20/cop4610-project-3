@@ -68,18 +68,8 @@ void print_bpb_info(BPB *bpb, FILE *fp) {
     printf("Size of image (in bytes): %u\n", (bpb->BPB_TotSec32 * bpb->BPB_BytesPerSec));
 }
 
-void cleanup_and_exit(BPB *bpb, FILE *fp) {
-    if (fp!=NULL) {
-        fclose(fp);
-    }
-    if (bpb!=NULL) {
-        free(bpb);
-    }
-    exit(0);
-}
-
 int main(int argc, char *argv[]){
-        if (argc != 2) {
+    if (argc != 2) {
         fprintf(stderr, "Usage: %s [FAT32 ISO file]\n", argv[0]);
         return 1;
     }
@@ -117,7 +107,9 @@ int main(int argc, char *argv[]){
             cleanup_and_exit(&bpb, fp);
         }
         else if (fgets(input, sizeof(input), stdin) == "exit") {;
-            cleanup_and_exit(&bpb, fp);
+            free(input);
+            free_tokens(tokens);
+            break;
         }
         else if (fgets(input, sizeof(input), stdin) == "info") {
             print_bpb_info(&bpb, fp);
@@ -126,7 +118,10 @@ int main(int argc, char *argv[]){
             printf("Invalid command\n");
         }
 
+        free(input);
+        free_tokens(tokens);
     }
 
+    fclose(fp);
     return 0;
 }
