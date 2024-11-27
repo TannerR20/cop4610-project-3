@@ -38,6 +38,22 @@ typedef struct __attribute__((packed))
     unsigned short Signature_word;
 } BPB;
 
+// directory entry structure
+typedef struct __attribute__((packed)) {
+    unsigned char DIR_Name[11];          
+    unsigned char DIR_Attr;              
+    unsigned char DIR_NTRes;             
+    unsigned char DIR_CrtTimeTenth;     
+    unsigned short DIR_CrtTime;          
+    unsigned short DIR_CrtDate;          
+    unsigned short DIR_LstAccDate;       
+    unsigned short DIR_FstClusHI;        
+    unsigned short DIR_WrtTime;          
+    unsigned short DIR_WrtDate;          
+    unsigned short DIR_FstClusLO;        
+    unsigned int DIR_FileSize;           
+} DIR;
+
 // Function to print BPB information
 void print_bpb_info(BPB *bpb, FILE *fp) {
     // total clusters in data region
