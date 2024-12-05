@@ -343,7 +343,7 @@ void open_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *file
                 return;
             }
 
-            snprintf(openFiles[openFileCount].path, sizeof(openFiles[openFileCount].path), "/%s", fatImagePath);
+            snprintf(openFiles[openFileCount].path, sizeof(openFiles[openFileCount].path), "./%s", fatImagePath);
 
             // Add the file to the open file list
             strcpy(openFiles[openFileCount].name, filename);
@@ -482,10 +482,20 @@ void lseek_file(const char *filename, unsigned int offset, FILE *fp, BPB *bpb, u
 }
 
 // Function for read command
-void read_file(const char *filename, unsigned int size) {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Assuming necessary structures like BPB, FileEntry, etc., are defined elsewhere
+
+// Function to read a file from the FAT32 file system
+void read_file(FILE *fp, BPB *bpb, const char *filename, unsigned int *offset, unsigned int size) {
 
 
 }
+
+
+
 
 void update_file(const char *filename, BPB *bpb, char *data, unsigned int size) {
     int found = 0;
@@ -502,7 +512,8 @@ void update_file(const char *filename, BPB *bpb, char *data, unsigned int size) 
             }
 
             // Open the FAT32 image file
-            FILE *fp = fopen(openFiles[i].path, "rb+");
+            FILE *fp = fopen("./fat32.img", "rb+");
+            printf("Attempting to open image file: %s\n", openFiles[i].path);
             if (!fp) {
                 perror("Error opening the image file");
                 return;
@@ -584,7 +595,6 @@ void update_file(const char *filename, BPB *bpb, char *data, unsigned int size) 
         printf("Error: File '%s' is not open or does not exist.\n", filename);
     }
 }
-
  
 int file_exists(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename) {
     DIR dirEntry;
@@ -640,11 +650,6 @@ void rename_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *ol
     unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
     unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
     unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
-    printf("rootDirSector=%u\n", rootDirSector);
-    printf("bytesPerCluster=%u\n", bytesPerCluster);
-    printf("dataRegionStart=%u\n", dataRegionStart);
-    printf("clusterOffset=%u\n", clusterOffset);
-
 
     fseek(fp, clusterOffset, SEEK_SET);
 
@@ -809,7 +814,8 @@ int main(int argc, char *argv[]) {
             } else if (strcmp(tokens->items[0], "read") == 0) {
                 if (tokens->size == 3) {
                     unsigned int size = strtoul(tokens->items[2], NULL, 10); // Convert SIZE from string to unsigned int
-                    read_file(tokens->items[1], size);
+                    unsigned int offset = 0;
+                    read_file(fp, &bpb, tokens->items[1], &offset, size);
                 } else {
                     printf("Error: Usage: read [FILENAME] [SIZE]\n");
                 }
