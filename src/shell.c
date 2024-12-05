@@ -742,6 +742,52 @@ void delete_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *fi
     printf("Error: File '%s' not found.\n", filename);
 }
 
+void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname){
+    bool flag = 0;
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
+    unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
+    unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
+
+    while (1) {
+        fseek(fp, clusterOffset, SEEK_SET);
+        for (unsigned int i = 0; i < bytesPerCluster / sizeof(DIR); i++) {
+            DIR dirEntry;
+            fread(&dirEntry, sizeof(DIR), 1, fp);
+            if (dirEntry.DIR_Name[0] == 0x00) {
+                flag = 1; // End of directory
+            }
+            if (dirEntry.DIR_Name[0] != 0xE5 && dirEntry.DIR_Name[0] != '.') {
+                flag = 0; // Directory is not empty
+            }
+            if (dirEntry.DIR_Name[0] == '.' && (dirEntry.DIR_Name[1] == ' ' || dirEntry.DIR_Name[1] == '.')) {
+                continue; // Skip . and ..
+            }
+            if (dirEntry.DIR_Name[0] != 0xE5) {
+                flag = 0; // Directory is not empty
+            }
+        }
+
+        // Move to the next cluster
+        unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (currentCluster * 4);
+        fseek(fp, fatOffset, SEEK_SET);
+        fread(&currentCluster, sizeof(unsigned int), 1, fp);
+        currentCluster &= 0x0FFFFFFF; // Reset high bits
+
+        if (currentCluster >= 0x0FFFFFF8) {
+            return 1; // End of cluster chain
+        }
+
+        clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
+    }
+    if (flag == 1){
+        delete_file(fp, bpb, currentCluster, dirname);
+    }
+    else{
+        printf("Error: Directory '%s' is not empty.\n", dirname);
+    }
+
+}
 
 /************************************************************************************************/
 
@@ -831,6 +877,19 @@ int main(int argc, char *argv[]) {
                 } else {
                     printf("Error: Usage: rename [OLDNAME] [NEWNAME]\n");
                 }
+            } else if (strcmp(tokens->items[0], "rm") == 0) {
+                if (tokens->size == 2) {
+                    delete_file(fp, &bpb, currentCluster, tokens->items[1]);
+                } else {
+                    printf("Error: Usage: rm [FILENAME]\n");
+                }
+            }   else if (strcmp(tokens->items[0], "rmdir") == 0) {
+                if (tokens->size == 2) {
+                    delete_dir(fp, &bpb, currentCluster, tokens->items[1]);
+                } else {
+                    printf("Error: Usage: rmdir [DIRNAME]\n");
+                }
+            }
 
             } else if (strcmp(tokens->items[0], "exit") == 0) {
                 free(input);
