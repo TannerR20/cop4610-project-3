@@ -788,6 +788,96 @@ void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dir
     }
 
 }
+    void mkdir_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname) {
+    if (file_exists(fp, bpb, currentCluster, dirname)) {
+        printf("Error: Directory or file '%s' already exists.\n", dirname);
+        return;
+    }
+
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
+    unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
+    unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
+
+    fseek(fp, clusterOffset, SEEK_SET);
+
+    DIR dirEntry = {0};
+    while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
+        if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
+            // Empty or deleted directory entry found
+            memset(&dirEntry, 0, sizeof(DIR));
+            strncpy((char *)dirEntry.DIR_Name, dirname, 11);
+            dirEntry.DIR_Attr = 0x10; // Directory attribute
+
+            unsigned int newCluster = 2;
+            unsigned int fatEntry;
+
+            // Find a free cluster
+            while (1) {
+                unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (newCluster * 4);
+                fseek(fp, fatOffset, SEEK_SET);
+                fread(&fatEntry, sizeof(unsigned int), 1, fp);
+                fatEntry &= 0x0FFFFFFF; // Mask to get valid cluster value
+                if (fatEntry == 0x00000000) { // Free cluster
+                    break;
+                }
+                newCluster++;
+            }
+
+            // Mark the new cluster in the FAT
+            unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (newCluster * 4);
+            fseek(fp, fatOffset, SEEK_SET);
+            fatEntry = 0x0FFFFFFF; // End of chain marker
+            fwrite(&fatEntry, sizeof(unsigned int), 1, fp);
+
+            dirEntry.DIR_FstClusLO = newCluster & 0xFFFF;
+            dirEntry.DIR_FstClusHI = (newCluster >> 16) & 0xFFFF;
+
+            fseek(fp, -sizeof(DIR), SEEK_CUR);
+            fwrite(&dirEntry, sizeof(DIR), 1, fp);
+
+            printf("Directory '%s' created successfully.\n", dirname);
+            return;
+        }
+    }
+
+    printf("Error: No space to create directory '%s'.\n", dirname);
+}
+
+
+void creat_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename) {
+    if (file_exists(fp, bpb, currentCluster, filename)) {
+        printf("Error: Directory or file '%s' already exists.\n", filename);
+        return;
+    }
+
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
+    unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
+    unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
+
+    fseek(fp, clusterOffset, SEEK_SET);
+
+    DIR dirEntry = {0};
+    while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
+        if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
+            // Empty or deleted directory entry found
+            memset(&dirEntry, 0, sizeof(DIR));
+            strncpy((char *)dirEntry.DIR_Name, filename, 11);
+            dirEntry.DIR_Attr = 0x20; // File attribute
+            dirEntry.DIR_FileSize = 0;
+
+            fseek(fp, -sizeof(DIR), SEEK_CUR);
+            fwrite(&dirEntry, sizeof(DIR), 1, fp);
+
+            printf("File '%s' created successfully.\n", filename);
+            return;
+        }
+    }
+
+    printf("Error: No space to create file '%s'.\n", filename);
+}
+
 
 /************************************************************************************************/
 
@@ -820,7 +910,7 @@ int main(int argc, char *argv[]) {
     char *imageName = basename(argv[1]);
     char pathToImage[256] = "/";
     char *input;
-    while (1) {
+   while (1) {
         printf("./%s%s> ", imageName, pathToImage);
         input = get_input();
 
@@ -883,25 +973,34 @@ int main(int argc, char *argv[]) {
                 } else {
                     printf("Error: Usage: rm [FILENAME]\n");
                 }
-            }   else if (strcmp(tokens->items[0], "rmdir") == 0) {
+            } else if (strcmp(tokens->items[0], "rmdir") == 0) {
                 if (tokens->size == 2) {
                     delete_dir(fp, &bpb, currentCluster, tokens->items[1]);
                 } else {
                     printf("Error: Usage: rmdir [DIRNAME]\n");
                 }
-            }
-
+            } else if (strcmp(tokens->items[0], "mkdir") == 0) {
+                if (tokens->size == 2) {
+                    mkdir_command(fp, &bpb, currentCluster, tokens->items[1]);
+                } else {
+                    printf("Error: Usage: mkdir [DIRNAME]\n");
+                }
+            } else if (strcmp(tokens->items[0], "creat") == 0) {
+                if (tokens->size == 2) {
+                    creat_command(fp, &bpb, currentCluster, tokens->items[1]);
+                } else {
+                    printf("Error: Usage: creat [FILENAME]\n");
+                }
             } else if (strcmp(tokens->items[0], "exit") == 0) {
                 free(input);
                 free_tokens(tokens);
                 break;
             }
-                    free(input);
-        free_tokens(tokens);
+            free(input);
+            free_tokens(tokens);
         }
-
-            fclose(fp);
-    return 0;
     }
 
-
+    fclose(fp);
+    return 0;
+}
