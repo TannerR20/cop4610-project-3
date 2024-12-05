@@ -749,7 +749,7 @@ int main(int argc, char *argv[]) {
         perror("Error");
         return 1;
     }
-    FILE *fp = fopen(argv[1], "rb");
+    FILE *fp = fopen(argv[1], "r+b");
     if (!fp) {
         perror("Error opening the image file");
         return 1;
