@@ -775,7 +775,7 @@ void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dir
         currentCluster &= 0x0FFFFFFF; // Reset high bits
 
         if (currentCluster >= 0x0FFFFFF8) {
-            return 1; // End of cluster chain
+            flag = 0; // End of cluster chain
         }
 
         clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
@@ -896,11 +896,12 @@ int main(int argc, char *argv[]) {
                 free_tokens(tokens);
                 break;
             }
-        }
-        free(input);
+                    free(input);
         free_tokens(tokens);
+        }
+
+            fclose(fp);
+    return 0;
     }
 
-    fclose(fp);
-    return 0;
-}
+
