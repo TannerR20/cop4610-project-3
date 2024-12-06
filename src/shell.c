@@ -588,7 +588,8 @@ void read_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *file
 
             // Update the offset in the file entry
             fileEntry->offset += bytesRead;
-            printf("\nFinished reading '%s'. Total bytes read: %u. Updated offset: %u.\n", filename, bytesRead, fileEntry->offset);
+            printf("\n");
+            //printf("\nFinished reading '%s'. Total bytes read: %u. Updated offset: %u.\n", filename, bytesRead, fileEntry->offset);
             return;
         }
     }
@@ -596,103 +597,141 @@ void read_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *file
     printf("Error: File '%s' not found in the current directory.\n", filename);
 }
 
-void update_file(const char *filename, BPB *bpb, char *data, unsigned int size) {
-    int found = 0;
+// function for write file
+void update_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename, const char *string) {
+    DIR dirEntry;
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
+    unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
+    unsigned int fatStart = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec;
 
-    // Search for the file in the open files list
-    for (int i = 0; i < openFileCount; i++) {
-        if (strcmp(openFiles[i].name, filename) == 0) {
-            found = 1;
+    // Locate the file in the directory
+    fseek(fp, dataRegionStart + (currentCluster - 2) * bytesPerCluster, SEEK_SET);
+    while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
+        if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
+            continue; // Skip empty or deleted entries
+        }
 
-            // Check if the file is opened in write mode
-            if (strchr(openFiles[i].mode, 'w') == NULL) {
-                printf("Error: File '%s' is not opened in write mode.\n", filename);
+        char entryName[12] = {0};
+        strncpy(entryName, (char *)dirEntry.DIR_Name, 11);
+        for (int i = 10; i >= 0; --i) {
+            if (entryName[i] == ' ') {
+                entryName[i] = '\0';
+            } else {
+                break;
+            }
+        }
+
+        if (strcmp(entryName, filename) == 0) {
+            if (dirEntry.DIR_Attr & 0x10) {
+                printf("Error: '%s' is a directory, not a file.\n", filename);
                 return;
             }
 
-            // Open the FAT32 image file
-            FILE *fp = fopen(openFiles[i].path, "rb+");
-            printf("Attempting to open image file: %s\n", openFiles[i].path);
-            if (!fp) {
-                perror("Error opening the image file");
-                return;
-            }
-
-            // Read BPB information
-            unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
-            unsigned int remainingSize = size;
-            unsigned int bytesWritten = 0;
-            unsigned int currentCluster = openFiles[i].offset / bytesPerCluster;
-            unsigned int clusterOffset = openFiles[i].offset % bytesPerCluster;
-
-            while (remainingSize > 0) {
-                unsigned int writeSize = (remainingSize < bytesPerCluster - clusterOffset)
-                                             ? remainingSize
-                                             : bytesPerCluster - clusterOffset;
-
-                // Calculate cluster's starting position
-                unsigned int dataRegionStart = (bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32)) * bpb->BPB_BytesPerSec;
-                unsigned int currentClusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster + clusterOffset;
-
-                // Write data to the cluster
-                fseek(fp, currentClusterOffset, SEEK_SET);
-                fwrite(data + bytesWritten, sizeof(char), writeSize, fp);
-
-                // Update remaining data and offset
-                remainingSize -= writeSize;
-                bytesWritten += writeSize;
-                clusterOffset = 0; // Reset for subsequent clusters
-
-                // Handle cluster chaining
-                if (remainingSize > 0) {
-                    // Read the next cluster from FAT
-                    unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (currentCluster * 4);
-                    fseek(fp, fatOffset, SEEK_SET);
-                    fread(&currentCluster, sizeof(unsigned int), 1, fp);
-                    currentCluster &= 0x0FFFFFFF; // Mask to get valid cluster value
-
-                    if (currentCluster >= 0x0FFFFFF8 || currentCluster == 0) {
-                        // Allocate a new cluster if end of chain is reached
-                        unsigned int newCluster = 2;
-                        unsigned int fatEntry;
-
-                        // Find a free cluster
-                        while (1) {
-                            fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (newCluster * 4);
-                            fseek(fp, fatOffset, SEEK_SET);
-                            fread(&fatEntry, sizeof(unsigned int), 1, fp);
-                            fatEntry &= 0x0FFFFFFF; // Mask to get valid cluster value
-                            if (fatEntry == 0x00000000) { // Free cluster
-                                break;
-                            }
-                            newCluster++;
-                        }
-
-                        // Mark the new cluster in the FAT
-                        fseek(fp, fatOffset, SEEK_SET);
-                        fatEntry = 0x0FFFFFFF; // End of chain marker
-                        fwrite(&fatEntry, sizeof(unsigned int), 1, fp);
-
-                        // Link the previous cluster to the new cluster
-                        fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (currentCluster * 4);
-                        fseek(fp, fatOffset, SEEK_SET);
-                        fatEntry = newCluster;
-                        fwrite(&fatEntry, sizeof(unsigned int), 1, fp);
-
-                        currentCluster = newCluster;
+            // Validate the file is open for writing
+            int fileFound = 0;
+            OpenFile *fileEntry = NULL;
+            for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                if (strcmp(openFiles[i].name, filename) == 0) {
+                    fileFound = 1;
+                    fileEntry = &openFiles[i];
+                    if (strcmp(fileEntry->mode, "w") != 0 && strcmp(fileEntry->mode, "wr") != 0 && strcmp(fileEntry->mode, "rw") != 0) {
+                        printf("Error: '%s' is not open in a valid write mode. Current mode: '%s'.\n", filename, fileEntry->mode);
+                        return;
                     }
+                    break;
+                }
+            }
+            if (!fileFound || fileEntry == NULL) {
+                printf("Error: File '%s' not found in the open files list.\n", filename);
+                return;
+            }
+
+            unsigned int fileCluster = dirEntry.DIR_FstClusLO;
+            unsigned int storedOffset = fileEntry->offset;
+            unsigned int stringLen = strlen(string);
+            unsigned int bytesToWrite = stringLen;
+            unsigned int bytesWritten = 0;
+
+            while (bytesToWrite > 0) {
+                unsigned int clusterNumber = fileCluster;
+                unsigned int clusterOffset = storedOffset % bytesPerCluster;
+
+                // Find or allocate a cluster
+                if (storedOffset >= dirEntry.DIR_FileSize) {
+                    // Extend the file with a new cluster if needed
+                    unsigned int newCluster = 0;
+                    for (unsigned int i = 2; i < bpb->BPB_TotSec32 / bpb->BPB_SecsPerClus; i++) {
+                        unsigned int fatOffset = fatStart + (i * 4);
+                        fseek(fp, fatOffset, SEEK_SET);
+                        fread(&newCluster, sizeof(unsigned int), 1, fp);
+                        newCluster &= 0x0FFFFFFF; // Mask out reserved bits
+
+                        if (newCluster == 0x00000000) { // Free cluster
+                            newCluster = i;
+                            fseek(fp, fatOffset, SEEK_SET);
+                            unsigned int eofMarker = 0x0FFFFFFF;
+                            fwrite(&eofMarker, sizeof(unsigned int), 1, fp);
+
+                            // Update FAT entry for the current cluster
+                            unsigned int lastClusterFatOffset = fatStart + (fileCluster * 4);
+                            fseek(fp, lastClusterFatOffset, SEEK_SET);
+                            fwrite(&newCluster, sizeof(unsigned int), 1, fp);
+
+                            fileCluster = newCluster;
+                            break;
+                        }
+                    }
+
+                    if (newCluster == 0) {
+                        printf("Error: No free clusters available.\n");
+                        return;
+                    }
+                }
+
+                unsigned int clusterDataOffset = dataRegionStart + (clusterNumber - 2) * bytesPerCluster + clusterOffset;
+                fseek(fp, clusterDataOffset, SEEK_SET);
+
+                unsigned int writeSize = (bytesToWrite < bytesPerCluster - clusterOffset) 
+                                         ? bytesToWrite 
+                                         : bytesPerCluster - clusterOffset;
+
+                fwrite(string + bytesWritten, 1, writeSize, fp);
+
+                bytesWritten += writeSize;
+                bytesToWrite -= writeSize;
+                clusterOffset = 0; // Reset for the next cluster
+                storedOffset += writeSize;
+
+                // Update file size in the directory entry
+                if (storedOffset > dirEntry.DIR_FileSize) {
+                    dirEntry.DIR_FileSize = storedOffset;
+                }
+
+                // Move to the next cluster
+                unsigned int fatOffset = fatStart + (fileCluster * 4);
+                fseek(fp, fatOffset, SEEK_SET);
+                fread(&fileCluster, sizeof(unsigned int), 1, fp);
+                fileCluster &= 0x0FFFFFFF;
+
+                if (fileCluster == 0x0FFFFFF8 || fileCluster == 0x0FFFFFFF) {
+                    fileCluster = 0; // End of file chain
                 }
             }
 
-            fclose(fp);
-            printf("File '%s' updated successfully.\n", filename);
+            // Write updated directory entry back to disk
+            fseek(fp, -sizeof(DIR), SEEK_CUR);
+            fwrite(&dirEntry, sizeof(DIR), 1, fp);
+
+            // Update the file's offset
+            fileEntry->offset = storedOffset;
+
+            printf("Finished writing to '%s'. Total bytes written: %u. Updated offset: %u.\n", filename, bytesWritten, storedOffset);
             return;
         }
     }
 
-    if (!found) {
-        printf("Error: File '%s' is not open or does not exist.\n", filename);
-    }
+    printf("Error: File '%s' not found in the current directory.\n", filename);
 }
  
 int file_exists(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename) {
@@ -1055,7 +1094,7 @@ int main(int argc, char *argv[]) {
                 }
             } else if (strcmp(tokens->items[0], "write") == 0) {
                 if (tokens->size == 3) {
-                    update_file(tokens->items[1], &bpb, tokens->items[2], strlen(tokens->items[2]));
+                    update_file(fp, &bpb, currentCluster, tokens->items[1], tokens->items[2]);
                 } else {
                     printf("Error: Usage: write [FILENAME] [DATA]\n");
                 }
