@@ -927,61 +927,113 @@ void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dir
 
 }
 
+unsigned int find_free_cluster(FILE *fp, BPB *bpb) {
+    unsigned int fatStart = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec; // Start of the FAT
+    unsigned int totalClusters = bpb->BPB_TotSec32 / bpb->BPB_SecsPerClus; // Total number of clusters in the FAT32 volume
+    unsigned int fatEntrySize = 4; // FAT32 entry size is 4 bytes
+
+    // Iterate over the FAT table to find the first free cluster (value 0x00000000 in FAT32 indicates free)
+    for (unsigned int i = 2; i < totalClusters; ++i) { // Start from cluster 2 (clusters 0 and 1 are reserved)
+        unsigned int fatOffset = fatStart + (i * fatEntrySize);
+        unsigned int fatValue;
+
+        fseek(fp, fatOffset, SEEK_SET);
+        fread(&fatValue, sizeof(unsigned int), 1, fp);
+
+        // If the cluster is marked as free (0x00000000), return its index
+        if (fatValue == 0x00000000) {
+            printf("Debug: Found free cluster: %u\n", i);
+            return i;
+        }
+    }
+
+    printf("Error: No free clusters found.\n");
+    return 0; // No free clusters found, should handle this case.
+}
+
+// Function to mark a cluster as used in the FAT table
+void mark_cluster_used(FILE *fp, BPB *bpb, unsigned int cluster) {
+    // The location of the FAT starts after the reserved sectors, 
+    // followed by the FAT tables (depending on BPB_FATSz32).
+    unsigned int fatStart = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec;
+    unsigned int fatEntryOffset = fatStart + cluster * 4; // 4 bytes per FAT entry (32-bit)
+
+    // Seek to the FAT entry for the given cluster
+    fseek(fp, fatEntryOffset, SEEK_SET);
+
+    // The FAT entry for a used cluster should contain a non-zero value. 
+    // For simplicity, we'll just mark it as allocated (you can choose the actual value here).
+    unsigned int fatEntry = 0xFFFFFFF8; // This is the marker for a used cluster in FAT32 (FAT12 and FAT16 have different values)
+    
+    // Write the updated FAT entry
+    fwrite(&fatEntry, sizeof(unsigned int), 1, fp);
+}
+
 void mkdir_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname) {
+    // Check if the directory already exists
     if (file_exists(fp, bpb, currentCluster, dirname)) {
-        printf("Error: Directory or file '%s' already exists.\n", dirname);
+        printf("Error: Directory '%s' already exists.\n", dirname);
         return;
     }
 
+    // Find a free cluster for the new directory
+    unsigned int freeCluster = find_free_cluster(fp, bpb);
+    if (freeCluster == 0) {
+        printf("Error: No free clusters found for directory creation.\n");
+        return;
+    }
+
+    // Write the directory entry for the new directory in the parent directory
     unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
     unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
     unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
     unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
 
     fseek(fp, clusterOffset, SEEK_SET);
-
     DIR dirEntry = {0};
     while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
         if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
             // Empty or deleted directory entry found
             memset(&dirEntry, 0, sizeof(DIR));
             strncpy((char *)dirEntry.DIR_Name, dirname, 11);
-            dirEntry.DIR_Attr = 0x10; // Directory attribute
-
-            unsigned int newCluster = 2;
-            unsigned int fatEntry;
-
-            // Find a free cluster
-            while (1) {
-                unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (newCluster * 4);
-                fseek(fp, fatOffset, SEEK_SET);
-                fread(&fatEntry, sizeof(unsigned int), 1, fp);
-                fatEntry &= 0x0FFFFFFF; // Mask to get valid cluster value
-                if (fatEntry == 0x00000000) { // Free cluster
-                    break;
-                }
-                newCluster++;
-            }
-
-            // Mark the new cluster in the FAT
-            unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (newCluster * 4);
-            fseek(fp, fatOffset, SEEK_SET);
-            fatEntry = 0x0FFFFFFF; // End of chain marker
-            fwrite(&fatEntry, sizeof(unsigned int), 1, fp);
-
-            dirEntry.DIR_FstClusLO = newCluster & 0xFFFF;
-            dirEntry.DIR_FstClusHI = (newCluster >> 16) & 0xFFFF;
+            dirEntry.DIR_Attr = 0x10;  // Directory attribute (0x10)
+            dirEntry.DIR_FstClusLO = freeCluster;  // Point to the new cluster
 
             fseek(fp, -sizeof(DIR), SEEK_CUR);
             fwrite(&dirEntry, sizeof(DIR), 1, fp);
 
-            printf("Directory '%s' created successfully.\n", dirname);
-            return;
+            printf("Debug: Created directory entry for '%s'.\n", dirname);
+            break;
         }
     }
 
-    printf("Error: No space to create directory '%s'.\n", dirname);
+    // Write the '.' and '..' entries in the new directory
+    DIR dotEntry = {0};
+    strncpy((char *)dotEntry.DIR_Name, ".", 1);
+    dotEntry.DIR_Name[1] = '\0';  // Ensure null-termination
+    dotEntry.DIR_Attr = 0x10;  // Directory attribute
+    dotEntry.DIR_FstClusLO = freeCluster;  // Point to the new directory itself
+
+    DIR dotDotEntry = {0};
+    strncpy((char *)dotDotEntry.DIR_Name, "..", 2);
+    dotDotEntry.DIR_Name[2] = '\0';  // Ensure null-termination
+    dotDotEntry.DIR_Attr = 0x10;  // Directory attribute
+    dotDotEntry.DIR_FstClusLO = currentCluster;  // Point to the parent directory (root)
+
+    unsigned int newDirOffset = dataRegionStart + (freeCluster - 2) * bytesPerCluster;
+    fseek(fp, newDirOffset, SEEK_SET);
+
+    // Write the '.' and '..' entries into the new directory
+    fwrite(&dotEntry, sizeof(DIR), 1, fp);
+    fwrite(&dotDotEntry, sizeof(DIR), 1, fp);
+
+    // Mark the cluster as used in the FAT table
+    mark_cluster_used(fp, bpb, freeCluster);
+
+    printf("Directory '%s' created successfully.\n", dirname);
 }
+
+
 
 void creat_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename) {
     if (file_exists(fp, bpb, currentCluster, filename)) {
@@ -1015,7 +1067,6 @@ void creat_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *
 
     printf("Error: No space to create file '%s'.\n", filename);
 }
-
 
 /************************************************************************************************/
 
