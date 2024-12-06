@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <libgen.h>  // For basename()
 
 /************************************************************************************************/
@@ -64,6 +67,7 @@ typedef struct OpenFile {
     char path[512];      // path to the file
 } OpenFile;
 
+typedef unsigned int Cluster;  // FAT32 clusters are typically 32-bit values (unsigned int)
 
 
 /************************************************************************************************/
@@ -481,18 +485,103 @@ void lseek_file(const char *filename, unsigned int offset, FILE *fp, BPB *bpb, u
     }
 }
 
-// Function for read command
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+// function to read file
+void read_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename, unsigned int size) {
 
-// Assuming necessary structures like BPB, FileEntry, etc., are defined elsewhere
+    DIR dirEntry;
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
+    unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
+    unsigned int clusterOffset;
+    unsigned int bytesRead = 0;
 
-// Function to read a file from the FAT32 file system
-void read_file(FILE *fp, BPB *bpb, const char *filename, unsigned int *offset, unsigned int size) {
+    // Search for the file in the current directory to get its starting cluster
+    fseek(fp, dataRegionStart + (currentCluster - 2) * bytesPerCluster, SEEK_SET);
+    while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
+        if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
+            continue; // Skip empty or deleted entries
+        }
+
+        char entryName[12] = {0};
+        strncpy(entryName, (char *)dirEntry.DIR_Name, 11);
+        for (int i = 10; i >= 0; --i) {
+            if (entryName[i] == ' ') {
+                entryName[i] = '\0';
+            } else {
+                break;
+            }
+        }
+
+        // Compare the filename
+        if (strcmp(entryName, filename) == 0) {
+            if (dirEntry.DIR_Attr & 0x10) {
+                printf("Error: '%s' is a directory, not a file.\n", filename);
+                return;
+            }
+
+        // Check for read mode and openfile
+        int fileFound = 0;
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (strcmp(openFiles[i].name, filename) == 0) {
+                fileFound = 1;
+                if (strcmp(openFiles[i].mode, "r") != 0 && strcmp(openFiles[i].mode, "wr") != 0 && strcmp(openFiles[i].mode, "rw") != 0) {
+                    printf("Error: '%s' is not open in a valid read mode. Current mode: '%s'.\n", filename, openFiles[i].mode);
+                    return;
+                }
+            }
+        }
+        if (!fileFound) {
+            printf("Error: File '%s' not found in the open files list.\n", filename);
+            return;  // Return if file is not found
+        }
 
 
+
+            unsigned int fileCluster = dirEntry.DIR_FstClusLO; // Starting cluster for the file
+            printf("File '%s' starts at cluster %u\n", filename, fileCluster);
+
+            unsigned int clusterNumber = fileCluster;
+            unsigned int bytesRead = 0;
+            unsigned char buffer[bytesPerCluster];
+            
+            while (bytesRead < size) {
+                // Calculate the data region offset for the current cluster
+                unsigned int clusterDataOffset = dataRegionStart + (clusterNumber - 2) * bytesPerCluster;
+                fseek(fp, clusterDataOffset, SEEK_SET);
+
+                // Read data from the current cluster
+                unsigned int bytesToRead = size - bytesRead < bytesPerCluster ? size - bytesRead : bytesPerCluster;
+                fread(buffer, 1, bytesToRead, fp);
+
+                // Log the read data for debugging
+                printf("Read %u bytes from cluster %u\n", bytesToRead, clusterNumber);
+                for (unsigned int i = 0; i < bytesToRead; i++) {
+                    printf("%c", buffer[i]);
+                }
+
+                bytesRead += bytesToRead;
+
+                // Move to the next cluster in the FAT table
+                unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (clusterNumber * 4);
+                fseek(fp, fatOffset, SEEK_SET);
+                fread(&clusterNumber, sizeof(unsigned int), 1, fp);
+                clusterNumber &= 0x0FFFFFFF; // Mask to get valid cluster number
+
+                if (clusterNumber == 0x0FFFFFF8 || clusterNumber == 0x0FFFFFFF) {
+                    break; // End of file (cluster chain ends)
+                }
+            }
+
+            //printf("\nFinished reading '%s'. Total bytes read: %u.\n", filename, bytesRead);
+            return;
+        }
+    }
+
+    printf("Error: File '%s' not found in the current directory.\n", filename);
 }
+
+
+
 
 
 
@@ -512,7 +601,7 @@ void update_file(const char *filename, BPB *bpb, char *data, unsigned int size) 
             }
 
             // Open the FAT32 image file
-            FILE *fp = fopen("./fat32.img", "rb+");
+            FILE *fp = fopen(openFiles[i].path, "rb+");
             printf("Attempting to open image file: %s\n", openFiles[i].path);
             if (!fp) {
                 perror("Error opening the image file");
@@ -788,7 +877,8 @@ void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dir
     }
 
 }
-    void mkdir_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname) {
+
+void mkdir_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname) {
     if (file_exists(fp, bpb, currentCluster, dirname)) {
         printf("Error: Directory or file '%s' already exists.\n", dirname);
         return;
@@ -843,7 +933,6 @@ void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dir
 
     printf("Error: No space to create directory '%s'.\n", dirname);
 }
-
 
 void creat_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename) {
     if (file_exists(fp, bpb, currentCluster, filename)) {
@@ -950,8 +1039,7 @@ int main(int argc, char *argv[]) {
             } else if (strcmp(tokens->items[0], "read") == 0) {
                 if (tokens->size == 3) {
                     unsigned int size = strtoul(tokens->items[2], NULL, 10); // Convert SIZE from string to unsigned int
-                    unsigned int offset = 0;
-                    read_file(fp, &bpb, tokens->items[1], &offset, size);
+                    read_file(fp, &bpb, currentCluster, tokens->items[1], size);
                 } else {
                     printf("Error: Usage: read [FILENAME] [SIZE]\n");
                 }
