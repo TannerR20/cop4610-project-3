@@ -880,53 +880,6 @@ void delete_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *fi
     printf("Error: File '%s' not found.\n", filename);
 }
 
-void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname){
-    bool flag = 0;
-    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
-    unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
-    unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
-    unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
-
-    while (1) {
-        fseek(fp, clusterOffset, SEEK_SET);
-        for (unsigned int i = 0; i < bytesPerCluster / sizeof(DIR); i++) {
-            DIR dirEntry;
-            fread(&dirEntry, sizeof(DIR), 1, fp);
-            if (dirEntry.DIR_Name[0] == 0x00) {
-                flag = 1; // End of directory
-            }
-            if (dirEntry.DIR_Name[0] != 0xE5 && dirEntry.DIR_Name[0] != '.') {
-                flag = 0; // Directory is not empty
-            }
-            if (dirEntry.DIR_Name[0] == '.' && (dirEntry.DIR_Name[1] == ' ' || dirEntry.DIR_Name[1] == '.')) {
-                continue; // Skip . and ..
-            }
-            if (dirEntry.DIR_Name[0] != 0xE5) {
-                flag = 0; // Directory is not empty
-            }
-        }
-
-        // Move to the next cluster
-        unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (currentCluster * 4);
-        fseek(fp, fatOffset, SEEK_SET);
-        fread(&currentCluster, sizeof(unsigned int), 1, fp);
-        currentCluster &= 0x0FFFFFFF; // Reset high bits
-
-        if (currentCluster >= 0x0FFFFFF8) {
-            flag = 0; // End of cluster chain
-        }
-
-        clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
-    }
-    if (flag == 1){
-        delete_file(fp, bpb, currentCluster, dirname);
-    }
-    else{
-        printf("Error: Directory '%s' is not empty.\n", dirname);
-    }
-
-}
-
 unsigned int find_free_cluster(FILE *fp, BPB *bpb) {
     unsigned int fatStart = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec; // Start of the FAT
     unsigned int totalClusters = bpb->BPB_TotSec32 / bpb->BPB_SecsPerClus; // Total number of clusters in the FAT32 volume
@@ -1033,8 +986,6 @@ void mkdir_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *
     printf("Directory '%s' created successfully.\n", dirname);
 }
 
-
-
 void creat_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename) {
     if (file_exists(fp, bpb, currentCluster, filename)) {
         printf("Error: Directory or file '%s' already exists.\n", filename);
@@ -1066,6 +1017,108 @@ void creat_command(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *
     }
 
     printf("Error: No space to create file '%s'.\n", filename);
+}
+
+// Function to mark a cluster as free in the FAT table
+void mark_cluster_free(FILE *fp, BPB *bpb, unsigned int cluster) {
+    unsigned int fatStart = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec;
+    unsigned int fatEntryOffset = fatStart + cluster * 4; // 4 bytes per FAT entry (32-bit)
+
+    // Seek to the FAT entry for the given cluster
+    fseek(fp, fatEntryOffset, SEEK_SET);
+
+    // Mark the cluster as free (0x00000000)
+    unsigned int fatEntry = 0x00000000;
+    
+    // Write the updated FAT entry
+    fwrite(&fatEntry, sizeof(unsigned int), 1, fp);
+}
+
+// Function to check if the directory is empty (ignoring '.' and '..')
+int is_directory_empty(FILE *fp, BPB *bpb, unsigned int cluster) {
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int dataRegionStart = (bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32)) * bpb->BPB_BytesPerSec;
+    unsigned int clusterOffset = dataRegionStart + (cluster - 2) * bytesPerCluster;
+
+    fseek(fp, clusterOffset, SEEK_SET);
+    DIR dirEntry;
+    while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
+        // Skip '.' and '..' entries
+        if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
+            continue;
+        }
+        // If any other entry is found, the directory is not empty
+        if (dirEntry.DIR_Attr != 0x10) { // Not a directory
+            return 0;
+        }
+    }
+    return 1; // Directory is empty
+}
+
+// Function to remove the directory entry from the parent directory
+void remove_directory_entry(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname) {
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int dataRegionStart = (bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32)) * bpb->BPB_BytesPerSec;
+    unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
+
+    fseek(fp, clusterOffset, SEEK_SET);
+    DIR dirEntry;
+    while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
+        if (strncmp((char *)dirEntry.DIR_Name, dirname, 11) == 0) {
+            // Clear the directory entry
+            memset(&dirEntry, 0, sizeof(DIR));
+            fseek(fp, -sizeof(DIR), SEEK_CUR);
+            fwrite(&dirEntry, sizeof(DIR), 1, fp); // Write the cleared entry
+            break;
+        }
+    }
+}
+
+// Function to remove a directory
+void delete_dir(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *dirname) {
+    // Check if the directory exists
+    DIR dirEntry;
+    int found = 0;
+    unsigned int targetCluster = 0;
+    
+    // Search for the directory entry in the current directory
+    unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
+    unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
+    unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
+    unsigned int clusterOffset = dataRegionStart + (currentCluster - 2) * bytesPerCluster;
+
+    fseek(fp, clusterOffset, SEEK_SET);
+    while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
+        if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
+            continue; // Skip empty or deleted entries
+        }
+        
+        // Check if the directory name matches
+        if (strncmp((char *)dirEntry.DIR_Name, dirname, 11) == 0 && dirEntry.DIR_Attr == 0x10) {
+            found = 1;
+            targetCluster = dirEntry.DIR_FstClusLO; // Get the cluster of the directory
+            break;
+        }
+    }
+
+    if (!found) {
+        printf("Error: Directory '%s' not found or is not a directory.\n", dirname);
+        return;
+    }
+
+    // Check if the directory is empty
+    if (!is_directory_empty(fp, bpb, targetCluster)) {
+        printf("Error: Directory '%s' is not empty.\n", dirname);
+        return;
+    }
+
+    // Remove the directory entry from the parent directory
+    remove_directory_entry(fp, bpb, currentCluster, dirname);
+
+    // Mark the directory's clusters as free in the FAT
+    mark_cluster_free(fp, bpb, targetCluster);
+
+    printf("Directory '%s' removed successfully.\n", dirname);
 }
 
 /************************************************************************************************/
