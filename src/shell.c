@@ -487,15 +487,12 @@ void lseek_file(const char *filename, unsigned int offset, FILE *fp, BPB *bpb, u
 
 // function to read file
 void read_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *filename, unsigned int size) {
-
     DIR dirEntry;
     unsigned int bytesPerCluster = bpb->BPB_BytesPerSec * bpb->BPB_SecsPerClus;
     unsigned int rootDirSector = bpb->BPB_RsvdSecCnt + (bpb->BPB_NumFATs * bpb->BPB_FATSz32);
     unsigned int dataRegionStart = rootDirSector * bpb->BPB_BytesPerSec;
-    unsigned int clusterOffset;
-    unsigned int bytesRead = 0;
 
-    // Search for the file in the current directory to get its starting cluster
+    // Locate the file in the directory
     fseek(fp, dataRegionStart + (currentCluster - 2) * bytesPerCluster, SEEK_SET);
     while (fread(&dirEntry, sizeof(DIR), 1, fp) == 1) {
         if (dirEntry.DIR_Name[0] == 0x00 || dirEntry.DIR_Name[0] == 0xE5) {
@@ -512,79 +509,92 @@ void read_file(FILE *fp, BPB *bpb, unsigned int currentCluster, const char *file
             }
         }
 
-        // Compare the filename
         if (strcmp(entryName, filename) == 0) {
             if (dirEntry.DIR_Attr & 0x10) {
                 printf("Error: '%s' is a directory, not a file.\n", filename);
                 return;
             }
 
-        // Check for read mode and openfile
-        int fileFound = 0;
-        for (int i = 0; i < MAX_OPEN_FILES; i++) {
-            if (strcmp(openFiles[i].name, filename) == 0) {
-                fileFound = 1;
-                if (strcmp(openFiles[i].mode, "r") != 0 && strcmp(openFiles[i].mode, "wr") != 0 && strcmp(openFiles[i].mode, "rw") != 0) {
-                    printf("Error: '%s' is not open in a valid read mode. Current mode: '%s'.\n", filename, openFiles[i].mode);
+            // Validate the file is open
+            int fileFound = 0;
+            OpenFile *fileEntry = NULL;
+            for (int i = 0; i < MAX_OPEN_FILES; i++) {
+                if (strcmp(openFiles[i].name, filename) == 0) {
+                    fileFound = 1;
+                    fileEntry = &openFiles[i];
+                    if (strcmp(fileEntry->mode, "r") != 0 && strcmp(fileEntry->mode, "wr") != 0 && strcmp(fileEntry->mode, "rw") != 0) {
+                        printf("Error: '%s' is not open in a valid read mode. Current mode: '%s'.\n", filename, fileEntry->mode);
+                        return;
+                    }
+                    break;
+                }
+            }
+            if (!fileFound || fileEntry == NULL) {
+                printf("Error: File '%s' not found in the open files list.\n", filename);
+                return;
+            }
+
+            unsigned int fileCluster = dirEntry.DIR_FstClusLO;
+            unsigned int storedOffset = fileEntry->offset;
+            printf("File '%s' starts at cluster %u, offset %u\n", filename, fileCluster, storedOffset);
+
+            // Adjust starting cluster and offset
+            unsigned int clusterNumber = fileCluster;
+            unsigned int clusterOffset = storedOffset % bytesPerCluster;
+            unsigned int clustersToSkip = storedOffset / bytesPerCluster;
+
+            // Skip clusters based on storedOffset
+            for (unsigned int i = 0; i < clustersToSkip; i++) {
+                unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (clusterNumber * 4);
+                fseek(fp, fatOffset, SEEK_SET);
+                fread(&clusterNumber, sizeof(unsigned int), 1, fp);
+                clusterNumber &= 0x0FFFFFFF;
+                if (clusterNumber == 0x0FFFFFF8 || clusterNumber == 0x0FFFFFFF) {
+                    printf("Error: Offset exceeds file size.\n");
                     return;
                 }
             }
-        }
-        if (!fileFound) {
-            printf("Error: File '%s' not found in the open files list.\n", filename);
-            return;  // Return if file is not found
-        }
 
-
-
-            unsigned int fileCluster = dirEntry.DIR_FstClusLO; // Starting cluster for the file
-            printf("File '%s' starts at cluster %u\n", filename, fileCluster);
-
-            unsigned int clusterNumber = fileCluster;
-            unsigned int bytesRead = 0;
             unsigned char buffer[bytesPerCluster];
-            
+            unsigned int bytesRead = 0;
+
             while (bytesRead < size) {
-                // Calculate the data region offset for the current cluster
-                unsigned int clusterDataOffset = dataRegionStart + (clusterNumber - 2) * bytesPerCluster;
+                unsigned int clusterDataOffset = dataRegionStart + (clusterNumber - 2) * bytesPerCluster + clusterOffset;
                 fseek(fp, clusterDataOffset, SEEK_SET);
 
-                // Read data from the current cluster
-                unsigned int bytesToRead = size - bytesRead < bytesPerCluster ? size - bytesRead : bytesPerCluster;
+                unsigned int bytesToRead = (size - bytesRead < bytesPerCluster - clusterOffset) 
+                                           ? size - bytesRead 
+                                           : bytesPerCluster - clusterOffset;
                 fread(buffer, 1, bytesToRead, fp);
 
-                // Log the read data for debugging
                 printf("Read %u bytes from cluster %u\n", bytesToRead, clusterNumber);
                 for (unsigned int i = 0; i < bytesToRead; i++) {
                     printf("%c", buffer[i]);
                 }
 
                 bytesRead += bytesToRead;
+                clusterOffset = 0; // Reset for subsequent clusters
 
-                // Move to the next cluster in the FAT table
+                // Move to the next cluster
                 unsigned int fatOffset = bpb->BPB_RsvdSecCnt * bpb->BPB_BytesPerSec + (clusterNumber * 4);
                 fseek(fp, fatOffset, SEEK_SET);
                 fread(&clusterNumber, sizeof(unsigned int), 1, fp);
-                clusterNumber &= 0x0FFFFFFF; // Mask to get valid cluster number
+                clusterNumber &= 0x0FFFFFFF;
 
                 if (clusterNumber == 0x0FFFFFF8 || clusterNumber == 0x0FFFFFFF) {
-                    break; // End of file (cluster chain ends)
+                    break; // End of file
                 }
             }
 
-            //printf("\nFinished reading '%s'. Total bytes read: %u.\n", filename, bytesRead);
+            // Update the offset in the file entry
+            fileEntry->offset += bytesRead;
+            printf("\nFinished reading '%s'. Total bytes read: %u. Updated offset: %u.\n", filename, bytesRead, fileEntry->offset);
             return;
         }
     }
 
     printf("Error: File '%s' not found in the current directory.\n", filename);
 }
-
-
-
-
-
-
 
 void update_file(const char *filename, BPB *bpb, char *data, unsigned int size) {
     int found = 0;
